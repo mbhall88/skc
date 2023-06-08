@@ -3,7 +3,7 @@ use std::fs::File;
 use anyhow::Result;
 use clap::Parser;
 use noodles::fasta;
-use shared::n_to_bits_lut;
+use shared::{n_to_bits_lut, n_to_bits_movemask};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 
@@ -40,7 +40,7 @@ fn main() -> Result<()> {
         let seq = record.sequence().as_ref();
         for i in 0..seq.len() {
             let Some(kmer) = &seq.get(i..i + k) else {continue};
-            let h = n_to_bits_lut(kmer)[0] as usize;
+            let h = n_to_bits_movemask(kmer)[0] as usize;
             kmers.insert(h);
         }
     }
