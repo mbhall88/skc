@@ -6,6 +6,91 @@ use std::arch::x86_64::*;
 
 use std::alloc;
 
+pub fn encode(nuc: &[u8]) -> Vec<u64> {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { encode_movemask_avx(nuc) };
+        } else if is_x86_feature_detected!("sse2") {
+            return unsafe { encode_movemask_sse(nuc) };
+        }
+    }
+
+    encode_lut(nuc)
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn encode_movemask_avx(nuc: &[u8]) -> Vec<u64> {
+    let ptr = nuc.as_ptr() as *const __m256i;
+    let end_idx = nuc.len() / 32;
+    let len = end_idx + if nuc.len() % 32 == 0 { 0 } else { 1 };
+
+    let layout = alloc::Layout::from_size_align_unchecked(len * 8, 32);
+    let res_ptr = alloc::alloc(layout) as *mut u64;
+
+    for i in 0..end_idx as isize {
+        let v = _mm256_loadu_si256(ptr.offset(i));
+
+        // permute because unpacks works on the low/high 64 bits in each lane
+        let v = _mm256_permute4x64_epi64(v, 0b11011000);
+
+        // shift each group of two bits for each nucleotide to the end of each byte
+        let lo = _mm256_slli_epi64(v, 6);
+        let hi = _mm256_slli_epi64(v, 5);
+
+        // interleave bytes then extract the bit at the end of each byte
+        let a = _mm256_unpackhi_epi8(lo, hi);
+        let b = _mm256_unpacklo_epi8(lo, hi);
+
+        // zero extend after movemask
+        let a = (_mm256_movemask_epi8(a) as u32) as u64;
+        let b = (_mm256_movemask_epi8(b) as u32) as u64;
+
+        *res_ptr.offset(i) = (a << 32) | b;
+    }
+
+    if nuc.len() % 32 > 0 {
+        *res_ptr.offset(end_idx as isize) = *encode_lut(&nuc[(end_idx * 32)..]).get_unchecked(0);
+    }
+
+    Vec::from_raw_parts(res_ptr, len, len)
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "sse2")]
+unsafe fn encode_movemask_sse(nuc: &[u8]) -> Vec<u64> {
+    let ptr = nuc.as_ptr() as *const __m128i;
+    let end_idx = nuc.len() / 16;
+    let len = nuc.len() / 32 + if nuc.len() % 32 == 0 { 0 } else { 1 };
+
+    let layout = alloc::Layout::from_size_align_unchecked(len * 8, 16);
+    let res_ptr = alloc::alloc(layout) as *mut u32;
+
+    for i in 0..end_idx as isize {
+        let v = _mm_loadu_si128(ptr.offset(i));
+
+        // shift each group of two bits for each nucleotide to the end of each byte
+        let lo = _mm_slli_epi64(v, 6);
+        let hi = _mm_slli_epi64(v, 5);
+
+        // interleave bytes then extract the bit at the end of each byte
+        let a = _mm_unpackhi_epi8(lo, hi);
+        let b = _mm_unpacklo_epi8(lo, hi);
+        let a = _mm_movemask_epi8(a);
+        let b = _mm_movemask_epi8(b);
+
+        *res_ptr.offset(i) = ((a << 16) | b) as u32;
+    }
+
+    if nuc.len() % 16 > 0 {
+        *res_ptr.offset(end_idx as isize) =
+            *encode_lut(&nuc[(end_idx * 16)..]).get_unchecked(0) as u32;
+    }
+
+    Vec::from_raw_parts(res_ptr as *mut u64, len, len)
+}
+
 static BYTE_LUT: [u8; 128] = {
     let mut lut = [0u8; 128];
     lut[b'a' as usize] = 0b00;
@@ -21,6 +106,130 @@ static BYTE_LUT: [u8; 128] = {
     lut
 };
 
+fn encode_lut(nuc: &[u8]) -> Vec<u64> {
+    let mut res = vec![0u64; (nuc.len() / 32) + if nuc.len() % 32 == 0 { 0 } else { 1 }];
+
+    for i in 0..nuc.len() {
+        let offset = i / 32;
+        let shift = (i % 32) << 1;
+
+        unsafe {
+            *res.get_unchecked_mut(offset) = *res.get_unchecked(offset)
+                | ((*BYTE_LUT.get_unchecked(*nuc.get_unchecked(i) as usize) as u64) << shift);
+        }
+    }
+
+    res
+}
+
+pub fn decode(bits: &[u64], len: usize) -> Vec<u8> {
+    if len > (bits.len() * 32) {
+        panic!(
+            "The length {} is greater than the number of nucleotides!",
+            len
+        );
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { decode_shuffle_avx(bits, len) };
+        } else if is_x86_feature_detected!("sse4.1") {
+            return unsafe { decode_shuffle_sse(bits, len) };
+        }
+    }
+
+    decode_lut(bits, len)
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn decode_shuffle_avx(bits: &[u64], len: usize) -> Vec<u8> {
+    let layout = alloc::Layout::from_size_align_unchecked(bits.len() * 32, 32);
+    let ptr = alloc::alloc(layout) as *mut __m256i;
+
+    let shuffle_mask = _mm256_set_epi32(
+        0x07070707, 0x06060606, 0x05050505, 0x04040404, 0x03030303, 0x02020202, 0x01010101,
+        0x00000000,
+    );
+    let lo_mask = _mm256_set1_epi16(0b0000110000000011);
+    let lut_i32 =
+        (b'A' as i32) | ((b'C' as i32) << 8) | ((b'T' as i32) << 16) | ((b'G' as i32) << 24);
+    let lut = _mm256_set_epi32(
+        b'G' as i32,
+        b'T' as i32,
+        b'C' as i32,
+        lut_i32,
+        b'G' as i32,
+        b'T' as i32,
+        b'C' as i32,
+        lut_i32,
+    );
+
+    for i in 0..bits.len() {
+        let curr = *bits.get_unchecked(i) as i64;
+        let v = _mm256_set1_epi64x(curr);
+
+        // duplicate each byte four times
+        let v1 = _mm256_shuffle_epi8(v, shuffle_mask);
+
+        // separately right shift each 16-bit chunk by 0 or 4 bits
+        let v2 = _mm256_srli_epi16(v1, 4);
+
+        // merge together shifted chunks
+        let v = _mm256_blend_epi16(v1, v2, 0b10101010i32);
+
+        // only keep two bits in each byte
+        // either 0b0011 or 0b1100
+        let v = _mm256_and_si256(v, lo_mask);
+
+        // use lookup table to convert nucleotide bits to bytes
+        let v = _mm256_shuffle_epi8(lut, v);
+        _mm256_store_si256(ptr.offset(i as isize), v);
+    }
+
+    Vec::from_raw_parts(ptr as *mut u8, len, bits.len() * 32)
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "sse4.1")]
+unsafe fn decode_shuffle_sse(bits: &[u64], len: usize) -> Vec<u8> {
+    let layout = alloc::Layout::from_size_align_unchecked(bits.len() * 32, 16);
+    let ptr = alloc::alloc(layout) as *mut __m128i;
+
+    let bits_ptr = bits.as_ptr() as *const i32;
+
+    let shuffle_mask = _mm_set_epi32(0x03030303, 0x02020202, 0x01010101, 0x00000000);
+    let lo_mask = _mm_set1_epi16(0b0000110000000011);
+    let lut_i32 =
+        (b'A' as i32) | ((b'C' as i32) << 8) | ((b'T' as i32) << 16) | ((b'G' as i32) << 24);
+    let lut = _mm_set_epi32(b'G' as i32, b'T' as i32, b'C' as i32, lut_i32);
+
+    for i in 0..(bits.len() * 2) as isize {
+        let curr = *bits_ptr.offset(i);
+        let v = _mm_set1_epi32(curr);
+
+        // duplicate each byte four times
+        let v1 = _mm_shuffle_epi8(v, shuffle_mask);
+
+        // separately right shift each 16-bit chunk by 0 or 4 bits
+        let v2 = _mm_srli_epi16(v1, 4);
+
+        // merge together shifted chunks
+        let v = _mm_blend_epi16(v1, v2, 0b10101010i32);
+
+        // only keep two bits in each byte
+        // either 0b0011 or 0b1100
+        let v = _mm_and_si128(v, lo_mask);
+
+        // use lookup table to convert nucleotide bits to bytes
+        let v = _mm_shuffle_epi8(lut, v);
+        _mm_store_si128(ptr.offset(i), v);
+    }
+
+    Vec::from_raw_parts(ptr as *mut u8, len, bits.len() * 32)
+}
+
 static BITS_LUT: [u8; 4] = {
     let mut lut = [0u8; 4];
     lut[0b00] = b'A';
@@ -30,82 +239,20 @@ static BITS_LUT: [u8; 4] = {
     lut
 };
 
-/// Encode `{A, T/U, C, G}` from the byte string into pairs of bits (`{00, 10, 01, 11}`) packed into 64-bit integers,
-/// by using a naive scalar method.
-pub fn n_to_bits_lut(n: &[u8]) -> Vec<u64> {
-    let mut res = vec![0u64; (n.len() >> 5) + if n.len() & 31 == 0 { 0 } else { 1 }];
+fn decode_lut(bits: &[u64], len: usize) -> Vec<u8> {
+    let layout = unsafe { alloc::Layout::from_size_align_unchecked(len, 1) };
+    let res_ptr = unsafe { alloc::alloc(layout) };
 
-    unsafe {
-        for i in 0..n.len() {
-            let offset = i >> 5;
-            let shift = (i & 31) << 1;
-            *res.get_unchecked_mut(offset) = *res.get_unchecked(offset)
-                | ((*BYTE_LUT.get_unchecked(*n.get_unchecked(i) as usize) as u64) << shift);
+    for i in 0..len {
+        let offset = i >> 5;
+        let shift = (i & 31) << 1;
+        let curr = unsafe { *bits.get_unchecked(offset) };
+
+        unsafe {
+            *res_ptr.offset(i as isize) =
+                *BITS_LUT.get_unchecked(((curr >> shift) & 0b11) as usize);
         }
     }
 
-    res
-}
-
-/// Decode pairs of bits from packed 64-bit integers to get a byte string of `{A, T/U, C, G}`, by using a naive scalar
-/// method.
-pub fn bits_to_n_lut(bits: &[u64], len: usize) -> Vec<u8> {
-    if len > (bits.len() << 5) {
-        panic!("The length is greater than the number of nucleotides!");
-    }
-
-    unsafe {
-        let layout = alloc::Layout::from_size_align_unchecked(len, 1);
-        let res_ptr = alloc::alloc(layout);
-
-        for i in 0..len {
-            let offset = i >> 5;
-            let shift = (i & 31) << 1;
-            let curr = *bits.get_unchecked(offset);
-            *res_ptr.offset(i as isize) = *BITS_LUT.get_unchecked(((curr >> shift) & 0b11) as usize);
-        }
-
-        Vec::from_raw_parts(res_ptr, len, len)
-    }
-}
-
-/// Encode `{A, T/U, C, G}` from the byte string into pairs of bits (`{00, 10, 01, 11}`) packed into 64-bit integers,
-/// by using a vectorized method with the `permute4x64`, `unpack`, and `movemask` instructions.
-///
-/// Requires AVX2 support.
-pub fn n_to_bits_movemask(n: &[u8]) -> Vec<u64> {
-    let ptr = n.as_ptr() as *const __m256i;
-    let end_idx = n.len() >> 5;
-    let len = end_idx + if n.len() & 31 == 0 {0} else {1};
-
-    unsafe {
-        let layout = alloc::Layout::from_size_align_unchecked(len << 3, 8);
-        let res_ptr = alloc::alloc(layout) as *mut u64;
-        for i in 0..end_idx as isize {
-            let v = _mm256_loadu_si256(ptr.offset(i));
-
-            // permute because unpacks works on the low/high 64 bits in each lane
-            let v = _mm256_permute4x64_epi64(v, 0b11011000);
-
-            // shift each group of two bits for each nucleotide to the end of each byte
-            let lo = _mm256_slli_epi64(v, 6);
-            let hi = _mm256_slli_epi64(v, 5);
-
-            // interleave bytes then extract the bit at the end of each byte
-            let a = _mm256_unpackhi_epi8(lo, hi);
-            let b = _mm256_unpacklo_epi8(lo, hi);
-
-            // zero extend after movemask
-            let a = (_mm256_movemask_epi8(a) as u32) as u64;
-            let b = (_mm256_movemask_epi8(b) as u32) as u64;
-
-            *res_ptr.offset(i) = (a << 32) | b;
-        }
-
-        if n.len() & 31 > 0 {
-            *res_ptr.offset(end_idx as isize) = *n_to_bits_lut(&n[(end_idx << 5)..]).get_unchecked(0);
-        }
-
-        Vec::from_raw_parts(res_ptr, len, len)
-    }
+    unsafe { Vec::from_raw_parts(res_ptr, len, len) }
 }

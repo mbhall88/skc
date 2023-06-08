@@ -3,7 +3,7 @@ use std::fs::File;
 use anyhow::Result;
 use clap::Parser;
 use noodles::fasta;
-use shared::{n_to_bits_lut, n_to_bits_movemask};
+use shared::encode;
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 
@@ -33,23 +33,23 @@ fn main() -> Result<()> {
     let (reader, _compression) = niffler::from_path(Path::new(&args.target))?;
     let mut fa_reader = fasta::Reader::new(BufReader::new(reader));
 
-    let mut kmers = HashSet::new();
+    let mut target_kmers = HashSet::new();
 
     for record in fa_reader.records() {
         let record = record?;
         let seq = record.sequence().as_ref();
         for i in 0..seq.len() {
             let Some(kmer) = &seq.get(i..i + k) else {continue};
-            let h = n_to_bits_movemask(kmer)[0] as usize;
-            kmers.insert(h);
+            let h = encode(kmer)[0] as usize;
+            target_kmers.insert(h);
         }
     }
 
-    println!("{} distinct k-mers in target", kmers.len());
+    println!("{} distinct k-mers in target", target_kmers.len());
 
     if let Some(index) = args.write_index {
         let mut fd = File::create(index)?;
-        for i in &kmers {
+        for i in &target_kmers {
             writeln!(fd, "{}", i)?;
         }
     }
@@ -57,21 +57,21 @@ fn main() -> Result<()> {
     if let Some(query) = args.query {
         let (reader, _compression) = niffler::from_path(Path::new(&query))?;
         let mut fa_reader = fasta::Reader::new(BufReader::new(reader));
-        let mut n_shared = HashSet::new();
+        let mut shared_kmers = HashSet::new();
 
         for record in fa_reader.records() {
             let record = record?;
             let seq = record.sequence().as_ref();
             for i in 0..seq.len() {
                 let Some(kmer) = &seq.get(i..i + k) else { continue };
-                let h = n_to_bits_lut(kmer)[0] as usize;
-                if kmers.contains(&h) {
-                    n_shared.insert(h);
+                let h = encode(kmer)[0] as usize;
+                if target_kmers.contains(&h) {
+                    shared_kmers.insert(h);
                 }
             }
         }
 
-        println!("{} shared k-mers between target and query", n_shared.len());
+        println!("{} shared k-mers between target and query", shared_kmers.len());
     }
 
     Ok(())
