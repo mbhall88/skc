@@ -3,8 +3,10 @@ use std::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-
 use std::alloc;
+use std::ffi::OsStr;
+use std::path::Path;
+use thiserror::Error;
 
 pub fn encode(nuc: &[u8]) -> Vec<u64> {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -255,4 +257,72 @@ fn decode_lut(bits: &[u64], len: usize) -> Vec<u8> {
     }
 
     unsafe { Vec::from_raw_parts(res_ptr, len, len) }
+}
+
+/// A collection of custom errors relating to the command line interface for this package.
+#[derive(Error, Debug, PartialEq)]
+pub enum CliError {
+    /// Indicates that a string cannot be parsed into a [`CompressionFormat`](#compressionformat).
+    #[error("{0} is not a valid output format")]
+    InvalidCompression(String),
+}
+
+pub trait CompressionExt {
+    fn from_path<S: AsRef<OsStr> + ?Sized>(p: &S) -> Self;
+}
+
+impl CompressionExt for niffler::compression::Format {
+    /// Attempts to infer the compression type from the file extension. If the extension is not
+    /// known, then Uncompressed is returned.
+    fn from_path<S: AsRef<OsStr> + ?Sized>(p: &S) -> Self {
+        let path = Path::new(p);
+        match path.extension().map(|s| s.to_str()) {
+            Some(Some("gz")) => Self::Gzip,
+            Some(Some("zst")) => Self::Zstd,
+            Some(Some("bz") | Some("bz2")) => Self::Bzip,
+            Some(Some("lzma")) => Self::Lzma,
+            _ => Self::No,
+        }
+    }
+}
+
+pub fn parse_compression_format(s: &str) -> Result<niffler::compression::Format, CliError> {
+    match s {
+        "b" | "B" => Ok(niffler::Format::Bzip),
+        "g" | "G" => Ok(niffler::Format::Gzip),
+        "l" | "L" => Ok(niffler::Format::Lzma),
+        "u" | "U" => Ok(niffler::Format::No),
+        "z" | "Z" => Ok(niffler::Format::Zstd),
+        _ => Err(CliError::InvalidCompression(s.to_string())),
+    }
+}
+
+/// A utility function to validate compression level is in allowed range
+#[allow(clippy::redundant_clone)]
+pub fn parse_level(s: &str) -> Result<niffler::Level, String> {
+    let lvl = match s.parse::<u8>() {
+        Ok(1) => niffler::Level::One,
+        Ok(2) => niffler::Level::Two,
+        Ok(3) => niffler::Level::Three,
+        Ok(4) => niffler::Level::Four,
+        Ok(5) => niffler::Level::Five,
+        Ok(6) => niffler::Level::Six,
+        Ok(7) => niffler::Level::Seven,
+        Ok(8) => niffler::Level::Eight,
+        Ok(9) => niffler::Level::Nine,
+        Ok(10) => niffler::Level::Ten,
+        Ok(11) => niffler::Level::Eleven,
+        Ok(12) => niffler::Level::Twelve,
+        Ok(13) => niffler::Level::Thirteen,
+        Ok(14) => niffler::Level::Fourteen,
+        Ok(15) => niffler::Level::Fifteen,
+        Ok(16) => niffler::Level::Sixteen,
+        Ok(17) => niffler::Level::Seventeen,
+        Ok(18) => niffler::Level::Eighteen,
+        Ok(19) => niffler::Level::Nineteen,
+        Ok(20) => niffler::Level::Twenty,
+        Ok(21) => niffler::Level::TwentyOne,
+        _ => return Err(format!("Compression level {} not in the range 1-21", s)),
+    };
+    Ok(lvl)
 }
