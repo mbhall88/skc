@@ -1,11 +1,14 @@
 use anyhow::Result;
 use clap::Parser;
+use env_logger::Builder;
+use itertools::Itertools;
+use log::{info, LevelFilter};
 use noodles::fasta;
 use noodles::fasta::record::{Definition, Sequence};
 use shared::*;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs::File;
-use std::io::{stdout, BufReader, BufWriter, Write};
+use std::io::{stdout, BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 
 /// Simple program to greet a person
@@ -37,31 +40,38 @@ struct Args {
 }
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    let mut log_builder = Builder::new();
+    log_builder
+        .filter(None, LevelFilter::Info)
+        .format_module_path(false)
+        .format_target(false)
+        .init();
+
     let k = args.kmer as usize;
 
     let (reader, _compression) = niffler::from_path(Path::new(&args.target))?;
     let mut fa_reader = fasta::Reader::new(BufReader::new(reader));
 
-    // todo: add count = switch from HashSet to BTreeMap
-    let mut target_kmers = HashSet::new();
+    let mut target_kmers: HashMap<u64, KmerInfo> = HashMap::new();
 
     for record in fa_reader.records() {
         let record = record?;
+        let chrom = record.name();
         let seq = record.sequence().as_ref();
         for i in 0..seq.len() {
             let Some(kmer) = &seq.get(i..i + k) else {continue};
             let h = encode(kmer)[0];
-            target_kmers.insert(h);
+            target_kmers.entry(h).or_default().add_pos(chrom, i);
         }
     }
 
-    println!("{} unique k-mers in target", target_kmers.len());
+    info!("{} unique k-mers in target", target_kmers.len());
 
     let (reader, _compression) = niffler::from_path(Path::new(&args.query))?;
     let mut fa_reader = fasta::Reader::new(BufReader::new(reader));
-    let mut query_kmers = HashSet::new();
 
-    let mut output_handle = match &args.output {
+    let output_handle = match &args.output {
         None => match args.output_type {
             None => Box::new(stdout()),
             Some(fmt) => niffler::basic::get_writer(Box::new(stdout()), fmt, args.compress_level)?,
@@ -82,30 +92,43 @@ fn main() -> Result<()> {
 
     let mut fa_writer = fasta::Writer::new(output_handle);
 
+    let mut query_kmers: HashMap<u64, KmerInfo> = HashMap::new();
+
     for record in fa_reader.records() {
         let record = record?;
+        let chrom = record.name();
         let seq = record.sequence().as_ref();
         for i in 0..seq.len() {
             let Some(kmer) = &seq.get(i..i + k) else { continue };
             let h = encode(kmer)[0];
-            query_kmers.insert(h);
+            if target_kmers.contains_key(&h) {
+                query_kmers.entry(h).or_default().add_pos(chrom, i);
+            }
         }
+    }
+    info!(
+        "{} shared k-mers between target and query",
+        query_kmers.len()
+    );
 
-        let shared_kmers: Vec<_> = target_kmers.intersection(&query_kmers).collect();
-
-        println!(
-            "{} shared k-mers between target and query",
-            shared_kmers.len()
+    for (h, query_kmerinfo) in query_kmers {
+        let kmer = decode(&[h], k);
+        // safe to unwrap as we know the hash is in target
+        let target_kmerinfo = target_kmers.get(&h).unwrap();
+        let mut description = format!(
+            "tcount={} qcount={} ",
+            target_kmerinfo.count(),
+            query_kmerinfo.count()
         );
+        let target_positions = target_kmerinfo.positions.iter().join(",");
+        let query_positions = query_kmerinfo.positions.iter().join(",");
+        let pos_descr = format!("tpos={} qpos={}", target_positions, query_positions);
+        description.push_str(&pos_descr);
+        let definition = Definition::new(h.to_string(), Some(description));
+        let seq = Sequence::from(kmer);
+        let record = fasta::Record::new(definition, seq);
 
-        for h in shared_kmers {
-            let kmer = decode(&[*h], k);
-            let definition = Definition::new(h.to_string(), Some(format!("k={}", k)));
-            let seq = Sequence::from(kmer);
-            let record = fasta::Record::new(definition, seq);
-
-            fa_writer.write_record(&record)?;
-        }
+        fa_writer.write_record(&record)?;
     }
 
     Ok(())

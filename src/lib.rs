@@ -8,6 +8,27 @@ use std::ffi::OsStr;
 use std::path::Path;
 use thiserror::Error;
 
+#[derive(Default, Debug, Clone, Eq, PartialEq, Hash)]
+pub struct KmerInfo {
+    count: u32,
+    pub positions: Vec<String>,
+}
+
+impl KmerInfo {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add_pos(&mut self, chrom: &str, pos: usize) {
+        let s = format!("{chrom}:{}", pos);
+        self.positions.push(s)
+    }
+
+    pub fn count(&self) -> usize {
+        self.positions.len()
+    }
+}
+
 pub fn encode(nuc: &[u8]) -> Vec<u64> {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
