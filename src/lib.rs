@@ -19,8 +19,11 @@ impl KmerInfo {
         Self::default()
     }
 
+    /// Add a position to the KmerInfo. `chrom` and `pos` will be joined as `chrom`:`pos`. `pos` is
+    /// expected to be zero-based and will be incremented by 1 when joined with `chrom` to make it
+    /// one-based, which makes for easy searching in genome browsers
     pub fn add_pos(&mut self, chrom: &str, pos: usize) {
-        let s = format!("{chrom}:{}", pos);
+        let s = format!("{chrom}:{}", pos + 1);
         self.positions.push(s)
     }
 
@@ -74,7 +77,7 @@ unsafe fn encode_movemask_avx(nuc: &[u8]) -> Vec<u64> {
     }
 
     if nuc.len() % 32 > 0 {
-        *res_ptr.offset(end_idx as isize) = *encode_lut(&nuc[(end_idx * 32)..]).get_unchecked(0);
+        *res_ptr.add(end_idx) = *encode_lut(&nuc[(end_idx * 32)..]).get_unchecked(0);
     }
 
     Vec::from_raw_parts(res_ptr, len, len)
@@ -107,8 +110,7 @@ unsafe fn encode_movemask_sse(nuc: &[u8]) -> Vec<u64> {
     }
 
     if nuc.len() % 16 > 0 {
-        *res_ptr.offset(end_idx as isize) =
-            *encode_lut(&nuc[(end_idx * 16)..]).get_unchecked(0) as u32;
+        *res_ptr.add(end_idx) = *encode_lut(&nuc[(end_idx * 16)..]).get_unchecked(0) as u32;
     }
 
     Vec::from_raw_parts(res_ptr as *mut u64, len, len)
@@ -208,7 +210,7 @@ unsafe fn decode_shuffle_avx(bits: &[u64], len: usize) -> Vec<u8> {
 
         // use lookup table to convert nucleotide bits to bytes
         let v = _mm256_shuffle_epi8(lut, v);
-        _mm256_store_si256(ptr.offset(i as isize), v);
+        _mm256_store_si256(ptr.add(i), v);
     }
 
     Vec::from_raw_parts(ptr as *mut u8, len, bits.len() * 32)
@@ -272,8 +274,7 @@ fn decode_lut(bits: &[u64], len: usize) -> Vec<u8> {
         let curr = unsafe { *bits.get_unchecked(offset) };
 
         unsafe {
-            *res_ptr.offset(i as isize) =
-                *BITS_LUT.get_unchecked(((curr >> shift) & 0b11) as usize);
+            *res_ptr.add(i) = *BITS_LUT.get_unchecked(((curr >> shift) & 0b11) as usize);
         }
     }
 
@@ -346,4 +347,41 @@ pub fn parse_level(s: &str) -> Result<niffler::Level, String> {
         _ => return Err(format!("Compression level {} not in the range 1-21", s)),
     };
     Ok(lvl)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // A = 00, T/U = 10, C = 01, G = 11
+    #[test]
+    fn test_encode() {
+        assert_eq!(
+            encode(b"ATCGATCGATCGATCGATCGATCGATCGATCG"),
+            vec![0b1101100011011000110110001101100011011000110110001101100011011000]
+        );
+        assert_eq!(encode(b"ATCG"), vec![0b11011000]);
+        assert_eq!(encode(b"atcg"), vec![0b11011000]);
+    }
+
+    #[test]
+    fn test_decode() {
+        assert_eq!(
+            decode(
+                &[0b1101100011011000110110001101100011011000110110001101100011011000],
+                32
+            ),
+            "ATCGATCGATCGATCGATCGATCGATCGATCG".as_bytes()
+        );
+    }
+
+    #[test]
+    fn test_add_pos() {
+        let mut ki = KmerInfo::new();
+        ki.add_pos("chr", 3);
+        assert_eq!(ki.count(), 1);
+
+        ki.add_pos("chr", 9);
+        assert_eq!(ki.count(), 2);
+        assert_eq!(ki.positions, vec!["chr:4", "chr:10"]);
+    }
 }

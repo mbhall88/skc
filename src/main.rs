@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use env_logger::Builder;
 use itertools::Itertools;
@@ -50,13 +50,16 @@ fn main() -> Result<()> {
 
     let k = args.kmer as usize;
 
-    let (reader, _compression) = niffler::from_path(Path::new(&args.target))?;
+    let (reader, _compression) = niffler::from_path(Path::new(&args.target))
+        .with_context(|| format!("Failed to open {}", args.target))?;
     let mut fa_reader = fasta::Reader::new(BufReader::new(reader));
 
     let mut target_kmers: HashMap<u64, KmerInfo> = HashMap::new();
 
-    for record in fa_reader.records() {
-        let record = record?;
+    for (n_rec, record) in fa_reader.records().enumerate() {
+        let record = record.with_context(|| {
+            format!("Failed to parse record {} (zero-based) from target", n_rec)
+        })?;
         let chrom = record.name();
         let seq = record.sequence().as_ref();
         for i in 0..seq.len() {
@@ -68,16 +71,20 @@ fn main() -> Result<()> {
 
     info!("{} unique k-mers in target", target_kmers.len());
 
-    let (reader, _compression) = niffler::from_path(Path::new(&args.query))?;
+    let (reader, _compression) = niffler::from_path(Path::new(&args.query))
+        .with_context(|| format!("Failed to open {}", args.query))?;
     let mut fa_reader = fasta::Reader::new(BufReader::new(reader));
 
     let output_handle = match &args.output {
         None => match args.output_type {
             None => Box::new(stdout()),
-            Some(fmt) => niffler::basic::get_writer(Box::new(stdout()), fmt, args.compress_level)?,
+            Some(fmt) => niffler::basic::get_writer(Box::new(stdout()), fmt, args.compress_level)
+                .context("Failed to create writer to stdout")?,
         },
         Some(p) => {
-            let out_fd = File::create(p).map(BufWriter::new)?;
+            let out_fd = File::create(p)
+                .map(BufWriter::new)
+                .context(format!("Failed to create output {:?}", p))?;
 
             let fmt = match args.output_type {
                 None => match args.output {
@@ -86,7 +93,8 @@ fn main() -> Result<()> {
                 },
                 Some(f) => f,
             };
-            niffler::get_writer(Box::new(out_fd), fmt, args.compress_level)?
+            niffler::get_writer(Box::new(out_fd), fmt, args.compress_level)
+                .context("Failed to create writer for output file")?
         }
     };
 
@@ -94,8 +102,11 @@ fn main() -> Result<()> {
 
     let mut query_kmers: HashMap<u64, KmerInfo> = HashMap::new();
 
-    for record in fa_reader.records() {
-        let record = record?;
+    for (n_rec, record) in fa_reader.records().enumerate() {
+        let record = record.context(format!(
+            "Failed to parse record {} (zero-based) from query",
+            n_rec
+        ))?;
         let chrom = record.name();
         let seq = record.sequence().as_ref();
         for i in 0..seq.len() {
@@ -128,7 +139,9 @@ fn main() -> Result<()> {
         let seq = Sequence::from(kmer);
         let record = fasta::Record::new(definition, seq);
 
-        fa_writer.write_record(&record)?;
+        fa_writer
+            .write_record(&record)
+            .context("Failed to write record to output")?;
     }
 
     Ok(())
