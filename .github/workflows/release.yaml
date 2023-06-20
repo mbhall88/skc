@@ -8,6 +8,9 @@ on:
 env:
   CICD_INTERMEDIATES_DIR: "_release-intermediates"
 
+permissions:
+  contents: write
+  
 jobs:
   publish:
     name: Publish
@@ -139,5 +142,3 @@ jobs:
             ${{ steps.package.outputs.PKG_PATH }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        permissions:
-          contents: write
