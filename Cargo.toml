@@ -1,7 +1,15 @@
 [package]
-name = "shared"
+name = "skc"
 version = "0.1.0"
 edition = "2021"
+authors = ["Michael Hall <michael@mbh.sh>"]
+license = "MIT"
+description = "Shared k-mer content between two genomes"
+repository = "https://github.com/mbhall88/skc"
+homepage = "https://github.com/mbhall88/skc"
+readme = "README.md"
+keywords = ["bioinformatics", "k-mers"]
+categories = ["science", "command-line-utilities"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

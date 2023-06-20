@@ -5,23 +5,26 @@ use itertools::Itertools;
 use log::{info, LevelFilter};
 use noodles::fasta;
 use noodles::fasta::record::{Definition, Sequence};
-use shared::*;
+use skc::*;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{stdout, BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 
-/// Simple program to greet a person
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Target sequence
+    /// Target sequence (smallest of the two genomes recommended)
+    ///
+    /// Can be compressed with gzip, bzip2, xz, or zstd
     #[arg()]
     target: String,
     /// Query sequence
+    ///
+    /// Can be compressed with gzip, bzip2, xz, or zstd
     #[arg()]
     query: String,
-    /// Size of k-mers to use
+    /// Size of k-mers (max. 32)
     #[arg(short, long, default_value_t = 21, value_parser = clap::value_parser!(u64).range(1..=32))]
     kmer: u64,
     /// Output filepath(s); stdout if not present.
@@ -29,9 +32,8 @@ struct Args {
     pub output: Option<PathBuf>,
     /// u: uncompressed; b: Bzip2; g: Gzip; l: Lzma; z: Zstd
     ///
-    /// Will attempt to infer the output compression format automatically from the filename
-    /// extension. This option is used to override that. If writing to stdout, the default is
-    /// uncompressed
+    /// Output compression format is automatically guessed from the filename extension. This option
+    /// is used to override that
     #[clap(short = 'O', long, value_name = "u|b|g|l|z", value_parser = parse_compression_format, default_value="u")]
     pub output_type: Option<niffler::compression::Format>,
     /// Compression level to use if compressing output
