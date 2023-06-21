@@ -155,6 +155,9 @@ as I either struggled to install some alternate tools, they were clunky/verbose,
 k-mers out of the results (e.g. can only search one k-mer at a time or have to run many different subcommands). Here is
 a (non-exhaustive) list of other tools that can be used to get shared k-mer content
 
+- [unikmer](https://github.com/shenwei356/unikmer) - this was brought to my attention *after* I wrote `skc`. Had I known
+  about it beforehand, I probably wouldn't have written `skc`. So I would recommend unikmer for almost all use
+  cases - [Wei Shen](https://github.com/shenwei356) writes awesome tools
 - [Jellyfish](https://github.com/gmarcais/Jellyfish)
 - [REINDEER](https://github.com/kamimrcht/REINDEER)
 - [kmer-db](https://github.com/refresh-bio/kmer-db)
